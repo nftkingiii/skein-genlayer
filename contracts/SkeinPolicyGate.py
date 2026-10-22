@@ -36,7 +36,8 @@ class Policy:
     clause_ids_csv: str
     # Fact keys that may enable ALLOW. Each one must be attested; none can come from the requester.
     fact_keys_csv: str
-    # Fact keys every ALLOW requires, whatever clause it cites. A subset of fact_keys_csv.
+    # Fact keys every ALLOW requires, whatever clause it cites. A non-empty subset of
+    # fact_keys_csv, so every ALLOW rests on at least one attested fact.
     required_facts_csv: str
     # Lowercase hex addresses allowed to attest facts for this policy.
     attesters_csv: str
@@ -535,7 +536,8 @@ class SkeinPolicyGate(gl.Contract):
         if len(clause_ids) == 0:
             raise gl.vm.UserError("At least one clause id is required")
         fact_keys = self._fact_keys(fact_keys_csv, "fact_keys_csv", allow_empty=False)
-        required = self._fact_keys(required_facts_csv, "required_facts_csv", allow_empty=True)
+        # At least one required fact means no ALLOW can ever rest on model judgment alone.
+        required = self._fact_keys(required_facts_csv, "required_facts_csv", allow_empty=False)
         for fact in required:
             if fact not in fact_keys:
                 raise gl.vm.UserError("Every required fact must be a declared fact key")

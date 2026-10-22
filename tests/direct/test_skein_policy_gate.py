@@ -233,7 +233,7 @@ def test_only_policy_owner_can_update(direct_vm, direct_deploy, direct_alice, di
                 "P1: Allow everything.",
                 "P1",
                 FACT_KEYS,
-                "",
+                FACT_KEYS,
                 hx(direct_bob),
                 3600,
             )
@@ -341,8 +341,14 @@ def test_policy_requires_valid_facts_and_attesters(direct_vm, direct_deploy, dir
         contract.create_policy(
             "p", "n", POLICY_TEXT, "P1", "tenant_match", "is_admin", hx(direct_alice), 3600
         )
+    with direct_vm.expect_revert("required_facts_csv needs at least one fact key"):
+        contract.create_policy(
+            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, "", hx(direct_alice), 3600
+        )
     with direct_vm.expect_revert("invalid address"):
-        contract.create_policy("p", "n", POLICY_TEXT, "P1", FACT_KEYS, "", "not-an-address", 3600)
+        contract.create_policy(
+            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, FACT_KEYS, "not-an-address", 3600
+        )
 
 
 def test_rejects_private_or_oversized_payload_shapes(

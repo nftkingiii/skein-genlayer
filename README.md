@@ -39,7 +39,8 @@ Validators can agree on how to *read* a request, but agreement is not evidence
 that a fact is true. So Skein never lets the requester establish a fact.
 
 - The policy owner declares `fact_keys_csv` (every fact a clause may depend on),
-  `required_facts_csv` (facts every `ALLOW` needs), and `attesters_csv` (the
+  `required_facts_csv` (facts every `ALLOW` needs; at least one, so no
+  approval can rest on model judgment alone), and `attesters_csv` (the
   wallets allowed to vouch for those facts, such as the tenant's identity or
   support backend).
 - An authorized attester calls `attest(policy_id, subject_address,
