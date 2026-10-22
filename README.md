@@ -40,11 +40,11 @@ that a fact is true. So Skein never lets the requester establish a fact.
 
 - The policy owner declares `fact_keys_csv` (every fact a clause may depend on),
   `required_facts_csv` (facts every `ALLOW` needs; at least one, so no
-  approval can rest on model judgment alone), and `attesters_csv` (the
+  approval can rest on model judgment alone), and `attesters` (the
   wallets allowed to vouch for those facts, such as the tenant's identity or
   support backend).
-- An authorized attester calls `attest(policy_id, subject_address,
-  resource_scope, facts_csv, ttl_seconds)`. The attester is the transaction
+- An authorized attester calls `attest(policy_id, subject, resource_scope,
+  facts_csv, ttl_seconds)`. The attester is the transaction
   sender, so the source of each fact is verified by the chain itself. An
   attestation names one subject and one exact scope, and expires.
 - `request_access` reads the requester's live attestation from storage and gives
@@ -109,10 +109,10 @@ validated; the LLM may not invent either.
 
 ### Writes
 
-- `create_policy(policy_id, name, policy_text, clause_ids_csv, fact_keys_csv, required_facts_csv, attesters_csv, max_ttl_seconds)`
+- `create_policy(policy_id, name, policy_text, clause_ids_csv, fact_keys_csv, required_facts_csv, attesters, max_ttl_seconds)` where `attesters` is a list of addresses
 - `update_policy(...)` with the same arguments; bumps the policy version
 - `revoke_policy(policy_id)`
-- `attest(policy_id, subject_address, resource_scope, facts_csv, ttl_seconds)`
+- `attest(policy_id, subject, resource_scope, facts_csv, ttl_seconds)` (subject is an address)
 - `revoke_attestation(attestation_id)` (attester or policy owner)
 - `request_access(policy_id, resource_scope, purpose, requester_note)`
 
@@ -121,7 +121,7 @@ validated; the LLM may not invent either.
 - `get_policy(policy_id)`
 - `get_attestation(attestation_id)`
 - `get_receipt(receipt_id)`
-- `is_receipt_valid(receipt_id, requester_address, resource_scope)`
+- `is_receipt_valid(receipt_id, requester, resource_scope)` (requester is an address)
 
 ## Local verification
 

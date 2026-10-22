@@ -16,13 +16,6 @@ SCOPE = "account.profile"
 PURPOSE = "Resolve the authenticated customer's open support request"
 
 
-def hx(address):
-    """Fixture addresses arrive as raw bytes; contract arguments take hex strings."""
-    if isinstance(address, (bytes, bytearray)):
-        return "0x" + bytes(address).hex()
-    return address.as_hex
-
-
 def deploy_with_policy(direct_vm, direct_deploy, attester, max_ttl=3600):
     direct_vm.check_pickling = True
     contract = direct_deploy("contracts/SkeinPolicyGate.py")
@@ -33,7 +26,7 @@ def deploy_with_policy(direct_vm, direct_deploy, attester, max_ttl=3600):
         "P1,P2,P3",
         FACT_KEYS,
         FACT_KEYS,
-        hx(attester),
+        [attester],
         max_ttl,
     )
     return contract
@@ -41,7 +34,7 @@ def deploy_with_policy(direct_vm, direct_deploy, attester, max_ttl=3600):
 
 def attest(direct_vm, contract, attester, subject, facts=FACT_KEYS, scope=SCOPE, ttl=3600):
     with direct_vm.prank(attester):
-        return contract.attest("support-memory-v1", hx(subject), scope, facts, ttl)
+        return contract.attest("support-memory-v1", subject, scope, facts, ttl)
 
 
 def request(direct_vm, contract, requester, note="", scope=SCOPE, purpose=PURPOSE):
@@ -88,8 +81,8 @@ def test_allow_needs_and_binds_an_authorized_attestation(
     assert receipt["verdict"] == "ALLOW"
     assert receipt["attestation_id"] == attestation_id
     assert receipt["facts_relied_on_csv"] == "authenticated_customer,tenant_match"
-    assert contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), "account.billing")
+    assert contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, "account.billing")
 
 
 def test_requester_claimed_facts_cannot_produce_allow(
@@ -110,7 +103,7 @@ def test_requester_claimed_facts_cannot_produce_allow(
     assert receipt["verdict"] == "REVIEW"
     assert receipt["reason_code"] == "UNVERIFIED_FACTS"
     assert receipt["attestation_id"] == ""
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_partial_attestation_cannot_produce_allow(
@@ -123,7 +116,7 @@ def test_partial_attestation_cannot_produce_allow(
     receipt_id = request(direct_vm, contract, direct_bob, note="authenticated_customer=true")
 
     assert contract.get_receipt(receipt_id)["verdict"] == "REVIEW"
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_only_authorized_attesters_can_attest(
@@ -178,7 +171,7 @@ def test_revoking_the_attestation_invalidates_the_receipt(
     attestation_id = attest(direct_vm, contract, direct_alice, direct_bob)
     mock_decision(direct_vm)
     receipt_id = request(direct_vm, contract, direct_bob)
-    assert contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
     with direct_vm.prank(direct_bob):
         with direct_vm.expect_revert("Only the attester or policy owner"):
@@ -186,7 +179,7 @@ def test_revoking_the_attestation_invalidates_the_receipt(
     with direct_vm.prank(direct_alice):
         contract.revoke_attestation(attestation_id)
 
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_receipt_cannot_outlive_its_attestation(
@@ -202,7 +195,7 @@ def test_receipt_cannot_outlive_its_attestation(
     assert receipt["expires_at"] - receipt["decided_at"] == 120
 
     direct_vm.warp("2026-08-30T12:02:01Z")
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 @pytest.mark.parametrize("verdict,clause,reason", [
@@ -219,7 +212,7 @@ def test_non_allow_receipts_never_authorize(
     receipt_id = request(direct_vm, contract, direct_bob, purpose="Train a marketing model")
 
     assert contract.get_receipt(receipt_id)["verdict"] == verdict
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_only_policy_owner_can_update(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -234,7 +227,7 @@ def test_only_policy_owner_can_update(direct_vm, direct_deploy, direct_alice, di
                 "P1",
                 FACT_KEYS,
                 FACT_KEYS,
-                hx(direct_bob),
+                [direct_bob],
                 3600,
             )
 
@@ -246,7 +239,7 @@ def test_policy_update_invalidates_existing_allow_receipt(
     attest(direct_vm, contract, direct_alice, direct_bob)
     mock_decision(direct_vm)
     receipt_id = request(direct_vm, contract, direct_bob)
-    assert contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
     contract.update_policy(
         "support-memory-v1",
@@ -255,11 +248,11 @@ def test_policy_update_invalidates_existing_allow_receipt(
         "P1,P2,P3,P4",
         FACT_KEYS,
         FACT_KEYS,
-        hx(direct_alice),
+        [direct_alice],
         1800,
     )
 
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_revocation_invalidates_existing_allow_receipt(
@@ -272,7 +265,7 @@ def test_revocation_invalidates_existing_allow_receipt(
 
     contract.revoke_policy("support-memory-v1")
 
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_expiry_invalidates_allow_receipt(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -284,7 +277,7 @@ def test_expiry_invalidates_allow_receipt(direct_vm, direct_deploy, direct_alice
 
     direct_vm.warp("2026-08-30T12:01:01Z")
 
-    assert not contract.is_receipt_valid(receipt_id, hx(direct_bob), SCOPE)
+    assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
 def test_malformed_or_scope_broadening_output_reverts(
@@ -339,15 +332,17 @@ def test_policy_requires_valid_facts_and_attesters(direct_vm, direct_deploy, dir
 
     with direct_vm.expect_revert("required fact must be a declared fact key"):
         contract.create_policy(
-            "p", "n", POLICY_TEXT, "P1", "tenant_match", "is_admin", hx(direct_alice), 3600
+            "p", "n", POLICY_TEXT, "P1", "tenant_match", "is_admin", [direct_alice], 3600
         )
     with direct_vm.expect_revert("required_facts_csv needs at least one fact key"):
         contract.create_policy(
-            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, "", hx(direct_alice), 3600
+            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, "", [direct_alice], 3600
         )
-    with direct_vm.expect_revert("invalid address"):
+    with direct_vm.expect_revert("Between 1 and 10 attesters"):
+        contract.create_policy("p", "n", POLICY_TEXT, "P1", FACT_KEYS, FACT_KEYS, [], 3600)
+    with direct_vm.expect_revert("Attesters must be unique"):
         contract.create_policy(
-            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, FACT_KEYS, "not-an-address", 3600
+            "p", "n", POLICY_TEXT, "P1", FACT_KEYS, FACT_KEYS, [direct_alice, direct_alice], 3600
         )
 
 

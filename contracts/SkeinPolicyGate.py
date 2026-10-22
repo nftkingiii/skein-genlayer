@@ -112,17 +112,17 @@ class SkeinPolicyGate(gl.Contract):
         clause_ids_csv: str,
         fact_keys_csv: str,
         required_facts_csv: str,
-        attesters_csv: str,
+        attesters: list[Address],
         max_ttl_seconds: u32,
     ) -> None:
-        attesters = self._validate_policy_input(
+        attester_hexes = self._validate_policy_input(
             policy_id,
             name,
             policy_text,
             clause_ids_csv,
             fact_keys_csv,
             required_facts_csv,
-            attesters_csv,
+            attesters,
             max_ttl_seconds,
         )
         if policy_id in self.policies:
@@ -135,7 +135,7 @@ class SkeinPolicyGate(gl.Contract):
             clause_ids_csv=clause_ids_csv,
             fact_keys_csv=fact_keys_csv,
             required_facts_csv=required_facts_csv,
-            attesters_csv=",".join(attesters),
+            attesters_csv=",".join(attester_hexes),
             version=u32(1),
             active=True,
             max_ttl_seconds=max_ttl_seconds,
@@ -151,17 +151,17 @@ class SkeinPolicyGate(gl.Contract):
         clause_ids_csv: str,
         fact_keys_csv: str,
         required_facts_csv: str,
-        attesters_csv: str,
+        attesters: list[Address],
         max_ttl_seconds: u32,
     ) -> None:
-        attesters = self._validate_policy_input(
+        attester_hexes = self._validate_policy_input(
             policy_id,
             name,
             policy_text,
             clause_ids_csv,
             fact_keys_csv,
             required_facts_csv,
-            attesters_csv,
+            attesters,
             max_ttl_seconds,
         )
         policy = self._owned_policy(policy_id)
@@ -170,7 +170,7 @@ class SkeinPolicyGate(gl.Contract):
         policy.clause_ids_csv = clause_ids_csv
         policy.fact_keys_csv = fact_keys_csv
         policy.required_facts_csv = required_facts_csv
-        policy.attesters_csv = ",".join(attesters)
+        policy.attesters_csv = ",".join(attester_hexes)
         policy.max_ttl_seconds = max_ttl_seconds
         policy.version = u32(int(policy.version) + 1)
         policy.active = True
@@ -193,12 +193,12 @@ class SkeinPolicyGate(gl.Contract):
     def attest(
         self,
         policy_id: str,
-        subject_address: str,
+        subject: Address,
         resource_scope: str,
         facts_csv: str,
         ttl_seconds: u32,
     ) -> str:
-        """Record facts about one subject and one scope, signed by an authorized attester.
+        """Record facts about one subject address and one scope, from an authorized attester.
 
         The attester is the transaction sender, so the fact's source is verified by the
         chain, not claimed in calldata. Facts are bare keys (for example
@@ -214,7 +214,7 @@ class SkeinPolicyGate(gl.Contract):
         if attester.as_hex.lower() not in self._csv(policy.attesters_csv):
             raise gl.vm.UserError("Sender is not an authorized attester for this policy")
         self._require_text("resource_scope", resource_scope, MAX_SCOPE)
-        subject = self._address(subject_address, "subject_address")
+        subject = self._address(subject, "subject")
         facts = self._fact_keys(facts_csv, "facts_csv", allow_empty=False)
         declared = self._csv(policy.fact_keys_csv)
         for fact in facts:
@@ -421,7 +421,7 @@ class SkeinPolicyGate(gl.Contract):
     def is_receipt_valid(
         self,
         receipt_id: str,
-        requester_address: str,
+        requester: Address,
         resource_scope: str,
     ) -> bool:
         if receipt_id not in self.receipts:
@@ -429,7 +429,7 @@ class SkeinPolicyGate(gl.Contract):
         receipt = self.receipts[receipt_id]
         if receipt.verdict != VERDICT_ALLOW:
             return False
-        if receipt.requester != Address(requester_address):
+        if receipt.requester != self._address(requester, "requester"):
             return False
         if receipt.resource_scope != resource_scope:
             return False
@@ -524,7 +524,7 @@ class SkeinPolicyGate(gl.Contract):
         clause_ids_csv: str,
         fact_keys_csv: str,
         required_facts_csv: str,
-        attesters_csv: str,
+        attesters: list[Address],
         max_ttl_seconds: u32,
     ) -> list[str]:
         self._require_text("policy_id", policy_id, MAX_POLICY_ID)
@@ -541,17 +541,17 @@ class SkeinPolicyGate(gl.Contract):
         for fact in required:
             if fact not in fact_keys:
                 raise gl.vm.UserError("Every required fact must be a declared fact key")
-        attesters: list[str] = []
-        for raw in attesters_csv.split(","):
-            hex_value = self._address(raw.strip(), "attesters_csv").as_hex.lower()
-            if hex_value in attesters:
-                raise gl.vm.UserError("Attesters must be unique")
-            attesters.append(hex_value)
         if len(attesters) == 0 or len(attesters) > MAX_ATTESTERS:
             raise gl.vm.UserError("Between 1 and 10 attesters are required")
+        attester_hexes: list[str] = []
+        for attester in attesters:
+            hex_value = self._address(attester, "attesters").as_hex.lower()
+            if hex_value in attester_hexes:
+                raise gl.vm.UserError("Attesters must be unique")
+            attester_hexes.append(hex_value)
         if int(max_ttl_seconds) < 60 or int(max_ttl_seconds) > MAX_TTL_SECONDS:
             raise gl.vm.UserError("max_ttl_seconds must be between 60 and 604800")
-        return attesters
+        return attester_hexes
 
     def _validate_request_input(
         self,
@@ -760,7 +760,9 @@ Return only a JSON object with exactly these fields:
             return []
         return [part.strip() for part in value.split(",")]
 
-    def _address(self, value: str, field: str) -> Address:
+    def _address(self, value: typing.Any, field: str) -> Address:
+        if isinstance(value, Address):
+            return value
         try:
             return Address(value)
         except Exception:
