@@ -20,7 +20,7 @@
 | Abuse case | Control |
 | --- | --- |
 | Requester asserts facts it cannot prove (for example `tenant_match=true`) | Requester text is labelled unverified in the prompt, and a deterministic post-consensus gate downgrades any `ALLOW` to `REVIEW / UNVERIFIED_FACTS` unless every required fact and every fact relied on is in a live on-chain attestation. |
-| Unauthorized party vouches for a fact | `attest` requires the transaction sender to be in the policy's `attesters_csv`; facts must be declared by the policy. |
+| Unauthorized party vouches for a fact | `attest` requires the transaction sender to be in the policy's `attesters` list; facts must be declared by the policy. |
 | Attestation reused by another agent or for another resource | Attestations are keyed by policy, subject address, and exact scope. |
 | Approval outlives the facts behind it | Receipts store their attestation id; expiry is capped at the attestation's; revocation, expiry, or attester removal invalidates the receipt. |
 | Model relies on a fact the policy never declared | `facts_relied_on` must be a subset of declared fact keys, and it is one of the seven fields validators must agree on. |
