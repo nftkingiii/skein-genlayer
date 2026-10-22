@@ -19,18 +19,27 @@ allowlists well. It struggles with contextual rules such as:
 > that customer's open ticket, but never for model training or cross-tenant use.
 
 Skein uses GenLayer's leader-validator consensus so each validator independently
-assesses the same public request metadata against the same policy. A custom
-equivalence check accepts the leader's decision only when all security-relevant
-fields match: verdict, clause, reason code, exact scope, TTL, and policy version.
+assesses the same request against the same policy. The model is asked only for
+what needs judgment: verdict, deciding clause, and authorized scope (plus the
+policy version it read). Everything else is set by the contract, so validators
+running different models cannot disagree over wording:
 
-The contract then applies deterministic checks to the consensus result:
+- the reason code is derived from the outcome (`POLICY_PERMITS`,
+  `POLICY_FORBIDS`, `NEEDS_HUMAN_REVIEW`, `UNVERIFIED_FACTS`);
+- an `ALLOW` lives for the policy's `max_ttl_seconds`, capped at its
+  attestation's expiry;
+- a `REVIEW` stores no clause.
+
+A custom equivalence check accepts the leader's decision only when the leader's
+and the validator's *effective* decisions match on verdict, clause, and scope,
+after the verified-fact gate below has been applied to both. The contract also
+checks that:
 
 - only `ALLOW`, `DENY`, and `REVIEW` are accepted;
-- `ALLOW` must cite a declared clause;
-- the authorized scope must exactly equal the requested atomic scope;
-- TTL must be inside the policy owner's bound;
-- `DENY` and `REVIEW` cannot carry scope, TTL, or facts;
-- every fact an `ALLOW` depends on must be attested on chain (see below);
+- `ALLOW` and `DENY` cite a declared clause;
+- the authorized scope exactly equals the requested atomic scope;
+- `DENY` and `REVIEW` cannot carry a scope;
+- every required fact behind an `ALLOW` is attested on chain (see below);
 - updating or revoking a policy invalidates old receipts.
 
 ## Verified facts: who says a fact is true
@@ -50,10 +59,10 @@ that a fact is true. So Skein never lets the requester establish a fact.
 - `request_access` reads the requester's live attestation from storage and gives
   validators two separate inputs: `VERIFIED_FACTS` (from the attestation) and
   `UNVERIFIED_REQUESTER_NOTE` (the requester's own text).
-- The model must return `facts_relied_on`. After consensus, a deterministic gate
-  turns any `ALLOW` into `REVIEW / UNVERIFIED_FACTS` unless every required fact
-  and every fact relied on is in the attestation. No wording in the request can
-  satisfy it.
+- After consensus, a deterministic gate turns any `ALLOW` into
+  `REVIEW / UNVERIFIED_FACTS` unless every required fact is in the attestation.
+  No wording in the request can satisfy it. List every fact any permitting
+  clause depends on in `required_facts_csv`.
 - A receipt records its attestation and cannot outlive it. Revoking the
   attestation, letting it expire, or removing the attester from the policy makes
   `is_receipt_valid` return false.
@@ -141,6 +150,12 @@ plus the verified-fact boundary: requester-claimed facts, partial attestations,
 unauthorized attesters, undeclared facts, attestations reused by another
 requester or scope, attestation revocation, and receipts capped at attestation
 expiry.
+
+## Live deployment (GenLayer Studio)
+
+Recorded in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): contract address, source
+commit, and the transactions from a live run of the attest, request, deny, and
+revoke paths with Studio's multi-model validators.
 
 ## Deploy
 

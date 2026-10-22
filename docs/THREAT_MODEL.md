@@ -23,11 +23,12 @@
 | Unauthorized party vouches for a fact | `attest` requires the transaction sender to be in the policy's `attesters` list; facts must be declared by the policy. |
 | Attestation reused by another agent or for another resource | Attestations are keyed by policy, subject address, and exact scope. |
 | Approval outlives the facts behind it | Receipts store their attestation id; expiry is capped at the attestation's; revocation, expiry, or attester removal invalidates the receipt. |
-| Model relies on a fact the policy never declared | `facts_relied_on` must be a subset of declared fact keys, and it is one of the seven fields validators must agree on. |
+| Model invents a reason code or a long lifetime | The model returns only verdict, clause, scope, and policy version; any other field fails the schema check. Reason codes and lifetimes are set by the contract. |
+| Validators running different models split on wording | Validators compare effective decisions (after the fact gate) on verdict, clause, and scope only. |
 | Requester impersonates another agent | Requester is bound to `gl.message.sender_address`; it is not a user parameter. |
 | Request widens an approved scope | One atomic scope per request; deterministic exact-scope equality. |
 | Model invents a permissive clause | Clause must exist in the owner-declared clause ID set. |
-| Model smuggles authority into a denial | `DENY` and `REVIEW` require empty scope and zero TTL. |
+| Model smuggles authority into a denial | `DENY` and `REVIEW` require an empty scope and never receive a lifetime. |
 | Prompt injection in policy/request fields | Values are delimited and marked as untrusted; validators independently compare decisions; output is schema-checked. This mitigates but cannot eliminate model-level injection. |
 | Old approval survives a policy change | Receipt validity requires the current active policy version to match. |
 | Approval is replayed by another agent | Receipt validity binds the caller-supplied requester address to the original transaction sender. |
