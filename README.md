@@ -29,8 +29,33 @@ The contract then applies deterministic checks to the consensus result:
 - `ALLOW` must cite a declared clause;
 - the authorized scope must exactly equal the requested atomic scope;
 - TTL must be inside the policy owner's bound;
-- `DENY` and `REVIEW` cannot carry scope or TTL;
+- `DENY` and `REVIEW` cannot carry scope, TTL, or facts;
+- every fact an `ALLOW` depends on must be attested on chain (see below);
 - updating or revoking a policy invalidates old receipts.
+
+## Verified facts: who says a fact is true
+
+Validators can agree on how to *read* a request, but agreement is not evidence
+that a fact is true. So Skein never lets the requester establish a fact.
+
+- The policy owner declares `fact_keys_csv` (every fact a clause may depend on),
+  `required_facts_csv` (facts every `ALLOW` needs), and `attesters_csv` (the
+  wallets allowed to vouch for those facts, such as the tenant's identity or
+  support backend).
+- An authorized attester calls `attest(policy_id, subject_address,
+  resource_scope, facts_csv, ttl_seconds)`. The attester is the transaction
+  sender, so the source of each fact is verified by the chain itself. An
+  attestation names one subject and one exact scope, and expires.
+- `request_access` reads the requester's live attestation from storage and gives
+  validators two separate inputs: `VERIFIED_FACTS` (from the attestation) and
+  `UNVERIFIED_REQUESTER_NOTE` (the requester's own text).
+- The model must return `facts_relied_on`. After consensus, a deterministic gate
+  turns any `ALLOW` into `REVIEW / UNVERIFIED_FACTS` unless every required fact
+  and every fact relied on is in the attestation. No wording in the request can
+  satisfy it.
+- A receipt records its attestation and cannot outlive it. Revoking the
+  attestation, letting it expire, or removing the attester from the policy makes
+  `is_receipt_valid` return false.
 
 ## Public-data boundary
 
@@ -38,53 +63,62 @@ GenLayer contract source, calldata, prompts, outputs, and storage must be treate
 as public. Never submit private memory, document contents, secrets, personal
 data, credentials, or raw retrieval results to Skein.
 
-`purpose` and `context_metadata` must contain non-sensitive labels or booleans,
-for example:
+`purpose` and `requester_note` are public and unverified. Attested facts are
+bare, non-sensitive keys such as `tenant_match` or `authenticated_customer`,
+bound to a wallet address and a scope, never to a person's identity:
 
 ```text
+attest: facts_csv = authenticated_customer,tenant_match
 purpose: Resolve the authenticated customer's open support request
-context_metadata: tenant_match=true;authenticated_customer=true
+requester_note: Ticket is open in the support queue
 ```
 
-Only SHA-256 hashes of those two fields are retained in receipts. Hashing does
-not make low-entropy or sensitive calldata private; the original transaction
-input remains public.
+Only SHA-256 hashes of `purpose` and `requester_note` are retained in receipts.
+Hashing does not make low-entropy or sensitive calldata private; the original
+transaction input remains public.
 
 ## Contract lifecycle
 
-1. A policy owner calls `create_policy` with stable clause identifiers.
-2. An agent calls `request_access` for one atomic resource scope.
-3. Validators reason over the policy and public request metadata.
-4. Skein validates and stores the consensus result.
-5. The off-chain retrieval boundary calls `is_receipt_valid` immediately before
+1. A policy owner calls `create_policy` with clause ids, fact keys, required
+   facts, and authorized attesters.
+2. An authorized attester calls `attest` for the agent's address and one scope.
+3. The agent calls `request_access` for that atomic resource scope.
+4. Validators reason over the policy, the verified facts, and the unverified note.
+5. Skein validates the consensus result and enforces the verified-fact gate.
+6. The off-chain retrieval boundary calls `is_receipt_valid` immediately before
    releasing context.
-6. Policy updates, revocation, expiry, requester mismatch, or scope mismatch
-   fail closed.
+7. Policy updates, policy or attestation revocation, expiry, requester mismatch,
+   or scope mismatch fail closed.
 
 ## Example policy
 
 ```text
 P1: Support agents may read account.profile for the purpose of resolving an
-authenticated customer's open support request when tenant_match=true.
+authenticated customer's open support request when tenant_match and
+authenticated_customer are verified.
 P2: Marketing, model training, prospecting, and cross-tenant access are denied.
-P3: If tenant_match or authenticated_customer is missing, require human review.
+P3: If tenant_match or authenticated_customer is not verified, require human review.
 ```
 
-Use `P1,P2,P3` as `clause_ids_csv`. Clause IDs are validated and the LLM may not
-invent a new one.
+Use `P1,P2,P3` as `clause_ids_csv` and `authenticated_customer,tenant_match` as
+both `fact_keys_csv` and `required_facts_csv`. Clause IDs and fact keys are
+validated; the LLM may not invent either.
 
 ## Methods
 
 ### Writes
 
-- `create_policy(policy_id, name, policy_text, clause_ids_csv, max_ttl_seconds)`
-- `update_policy(policy_id, name, policy_text, clause_ids_csv, max_ttl_seconds)`
+- `create_policy(policy_id, name, policy_text, clause_ids_csv, fact_keys_csv, required_facts_csv, attesters_csv, max_ttl_seconds)`
+- `update_policy(...)` with the same arguments; bumps the policy version
 - `revoke_policy(policy_id)`
-- `request_access(policy_id, resource_scope, purpose, context_metadata)`
+- `attest(policy_id, subject_address, resource_scope, facts_csv, ttl_seconds)`
+- `revoke_attestation(attestation_id)` (attester or policy owner)
+- `request_access(policy_id, resource_scope, purpose, requester_note)`
 
 ### Views
 
 - `get_policy(policy_id)`
+- `get_attestation(attestation_id)`
 - `get_receipt(receipt_id)`
 - `is_receipt_valid(receipt_id, requester_address, resource_scope)`
 
@@ -101,7 +135,11 @@ py -3.12 -m venv .venv
 
 Direct tests cover authorization receipts, denial/review behavior, owner-only
 policy changes, policy-version invalidation, revocation, expiry, malformed model
-output, scope broadening, unknown clauses, input bounds, and validator dissent.
+output, scope broadening, unknown clauses, input bounds, and validator dissent,
+plus the verified-fact boundary: requester-claimed facts, partial attestations,
+unauthorized attesters, undeclared facts, attestations reused by another
+requester or scope, attestation revocation, and receipts capped at attestation
+expiry.
 
 ## Deploy
 
@@ -125,6 +163,9 @@ the intended network and contract revision have been verified.
 - Leader-validator LLM consensus reduces single-model dependence but does not make a
   poorly written policy safe.
 - Hashes attest to exact public inputs; they do not prove off-chain data quality.
+- Skein verifies who attested a fact, not that the attester is honest. Choose
+  attesters that already own the fact (the tenant's identity or support system)
+  and keep attestation lifetimes short.
 
 ## License
 
