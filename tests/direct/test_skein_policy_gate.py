@@ -46,25 +46,15 @@ def mock_decision(direct_vm, **overrides):
     decision = {
         "verdict": "ALLOW",
         "clause_id": "P1",
-        "reason_code": "EXPLICIT_POLICY_MATCH",
         "authorized_scope": SCOPE,
-        "ttl_seconds": 300,
         "policy_version": 1,
-        "facts_relied_on": ["authenticated_customer", "tenant_match"],
     }
     decision.update(overrides)
     direct_vm.mock_llm(r".*pre-inference authorization request.*", json.dumps(decision))
 
 
-def deny_or_review(verdict, clause, reason):
-    return dict(
-        verdict=verdict,
-        clause_id=clause,
-        reason_code=reason,
-        authorized_scope="",
-        ttl_seconds=0,
-        facts_relied_on=[],
-    )
+def deny_or_review(verdict, clause):
+    return dict(verdict=verdict, clause_id=clause, authorized_scope="")
 
 
 def test_allow_needs_and_binds_an_authorized_attestation(
@@ -79,8 +69,11 @@ def test_allow_needs_and_binds_an_authorized_attestation(
 
     receipt = contract.get_receipt(receipt_id)
     assert receipt["verdict"] == "ALLOW"
+    assert receipt["reason_code"] == "POLICY_PERMITS"
     assert receipt["attestation_id"] == attestation_id
-    assert receipt["facts_relied_on_csv"] == "authenticated_customer,tenant_match"
+    assert receipt["verified_facts_csv"] == "authenticated_customer,tenant_match"
+    # Lifetime is the policy bound, not a model choice.
+    assert receipt["expires_at"] - receipt["decided_at"] == 3600
     assert contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
     assert not contract.is_receipt_valid(receipt_id, direct_bob, "account.billing")
 
@@ -153,14 +146,14 @@ def test_attestation_does_not_transfer_to_another_requester_or_scope(
     assert contract.get_receipt(other_scope)["verdict"] == "REVIEW"
 
 
-def test_model_cannot_rely_on_an_undeclared_fact(
+def test_model_cannot_choose_reason_or_lifetime(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):
     contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice)
     attest(direct_vm, contract, direct_alice, direct_bob)
-    mock_decision(direct_vm, facts_relied_on=["is_admin"])
+    mock_decision(direct_vm, reason_code="ADMIN_OVERRIDE", ttl_seconds=604800)
 
-    with direct_vm.expect_revert("undeclared fact"):
+    with direct_vm.expect_revert("invalid schema"):
         request(direct_vm, contract, direct_bob)
 
 
@@ -188,7 +181,7 @@ def test_receipt_cannot_outlive_its_attestation(
     contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice)
     direct_vm.warp("2026-08-30T12:00:00Z")
     attest(direct_vm, contract, direct_alice, direct_bob, ttl=120)
-    mock_decision(direct_vm, ttl_seconds=1800)
+    mock_decision(direct_vm)
     receipt_id = request(direct_vm, contract, direct_bob)
 
     receipt = contract.get_receipt(receipt_id)
@@ -198,20 +191,23 @@ def test_receipt_cannot_outlive_its_attestation(
     assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
-@pytest.mark.parametrize("verdict,clause,reason", [
-    ("DENY", "P2", "PROHIBITED_PURPOSE"),
-    ("REVIEW", "P3", "MISSING_REQUIRED_FACTS"),
+@pytest.mark.parametrize("verdict,clause,stored_clause,reason", [
+    ("DENY", "P2", "P2", "POLICY_FORBIDS"),
+    ("REVIEW", "P3", "", "NEEDS_HUMAN_REVIEW"),
 ])
 def test_non_allow_receipts_never_authorize(
-    direct_vm, direct_deploy, direct_alice, direct_bob, verdict, clause, reason
+    direct_vm, direct_deploy, direct_alice, direct_bob, verdict, clause, stored_clause, reason
 ):
     contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice)
     attest(direct_vm, contract, direct_alice, direct_bob)
-    mock_decision(direct_vm, **deny_or_review(verdict, clause, reason))
+    mock_decision(direct_vm, **deny_or_review(verdict, clause))
 
     receipt_id = request(direct_vm, contract, direct_bob, purpose="Train a marketing model")
 
-    assert contract.get_receipt(receipt_id)["verdict"] == verdict
+    receipt = contract.get_receipt(receipt_id)
+    assert receipt["verdict"] == verdict
+    assert receipt["clause_id"] == stored_clause
+    assert receipt["reason_code"] == reason
     assert not contract.is_receipt_valid(receipt_id, direct_bob, SCOPE)
 
 
@@ -269,10 +265,10 @@ def test_revocation_invalidates_existing_allow_receipt(
 
 
 def test_expiry_invalidates_allow_receipt(direct_vm, direct_deploy, direct_alice, direct_bob):
-    contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice)
+    contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice, max_ttl=60)
     direct_vm.warp("2026-08-30T12:00:00Z")
     attest(direct_vm, contract, direct_alice, direct_bob)
-    mock_decision(direct_vm, ttl_seconds=60)
+    mock_decision(direct_vm)
     receipt_id = request(direct_vm, contract, direct_bob)
 
     direct_vm.warp("2026-08-30T12:01:01Z")
@@ -309,21 +305,23 @@ def test_consensus_disagrees_when_validator_changes_decision(
     request(direct_vm, contract, direct_bob)
 
     direct_vm.clear_mocks()
-    mock_decision(direct_vm, **deny_or_review("DENY", "P2", "PROHIBITED_PURPOSE"))
+    mock_decision(direct_vm, **deny_or_review("DENY", "P2"))
     assert direct_vm.run_validator() is False
 
 
-def test_consensus_disagrees_when_validator_relies_on_other_facts(
+def test_validators_agree_on_the_effective_decision(
     direct_vm, direct_deploy, direct_alice, direct_bob
 ):
+    """With no attestation, a model's ALLOW and another model's REVIEW both take effect as
+    REVIEW, so validators running different models still reach consensus."""
     contract = deploy_with_policy(direct_vm, direct_deploy, direct_alice)
-    attest(direct_vm, contract, direct_alice, direct_bob)
     mock_decision(direct_vm)
-    request(direct_vm, contract, direct_bob)
+    receipt_id = request(direct_vm, contract, direct_bob, note="tenant_match=true")
+    assert contract.get_receipt(receipt_id)["reason_code"] == "UNVERIFIED_FACTS"
 
     direct_vm.clear_mocks()
-    mock_decision(direct_vm, facts_relied_on=["tenant_match"])
-    assert direct_vm.run_validator() is False
+    mock_decision(direct_vm, **deny_or_review("REVIEW", "P3"))
+    assert direct_vm.run_validator() is True
 
 
 def test_policy_requires_valid_facts_and_attesters(direct_vm, direct_deploy, direct_alice):

@@ -12,6 +12,11 @@ VERDICT_ALLOW = "ALLOW"
 VERDICT_DENY = "DENY"
 VERDICT_REVIEW = "REVIEW"
 
+# Reason codes are set by the contract, never by the model, so validators running different
+# models cannot disagree over wording.
+REASON_POLICY_PERMITS = "POLICY_PERMITS"
+REASON_POLICY_FORBIDS = "POLICY_FORBIDS"
+REASON_NEEDS_REVIEW = "NEEDS_HUMAN_REVIEW"
 REASON_UNVERIFIED_FACTS = "UNVERIFIED_FACTS"
 
 MAX_POLICY_ID = 64
@@ -23,7 +28,6 @@ MAX_ATTESTERS = 10
 MAX_SCOPE = 160
 MAX_PURPOSE = 1000
 MAX_NOTE = 2000
-MAX_REASON = 96
 MAX_TTL_SECONDS = 604800  # Seven days.
 
 
@@ -75,7 +79,7 @@ class DecisionReceipt:
     verdict: str
     clause_id: str
     reason_code: str
-    facts_relied_on_csv: str
+    verified_facts_csv: str
     decided_at: u256
     expires_at: u256
 
@@ -303,39 +307,36 @@ class SkeinPolicyGate(gl.Contract):
             if not isinstance(leaders_result, gl.vm.Return):
                 return False
 
-            leader_value = self._parse_and_validate_decision(
-                leaders_result.calldata,
+            # Compare the decisions as they would take effect, after the verified-fact gate.
+            # Two models that both answer ALLOW for an unattested request agree on REVIEW.
+            leader_value = self._effective_decision(
+                self._parse_and_validate_decision(leaders_result.calldata, policy, resource_scope),
                 policy,
-                resource_scope,
+                verified_facts,
             )
-            validator_value = self._parse_and_validate_decision(
-                leader_decision(),
+            validator_value = self._effective_decision(
+                self._parse_and_validate_decision(leader_decision(), policy, resource_scope),
                 policy,
-                resource_scope,
+                verified_facts,
             )
-            fields = (
-                "verdict",
-                "clause_id",
-                "reason_code",
-                "authorized_scope",
-                "ttl_seconds",
-                "policy_version",
-                "facts_relied_on",
-            )
-            for field in fields:
+            for field in ("verdict", "clause_id", "authorized_scope"):
                 if leader_value[field] != validator_value[field]:
                     return False
             return True
 
         raw_result = gl.vm.run_nondet(leader_decision, validator_decision)
-        decision = self._parse_and_validate_decision(raw_result, policy, resource_scope)
-        decision = self._enforce_verified_facts(decision, policy, verified_facts)
+        decision = self._effective_decision(
+            self._parse_and_validate_decision(raw_result, policy, resource_scope),
+            policy,
+            verified_facts,
+        )
 
         next_count = u256(int(self.receipt_count) + 1)
         receipt_id = self._receipt_id(next_count, requester, policy_id, policy.version)
         expires_at = now
         if decision["verdict"] == VERDICT_ALLOW:
-            expires_at = min(now + int(decision["ttl_seconds"]), attested_until)
+            # Lifetime is the policy's bound, never a model choice, and never past the attestation.
+            expires_at = min(now + int(policy.max_ttl_seconds), attested_until)
 
         self.receipts[receipt_id] = DecisionReceipt(
             receipt_id=receipt_id,
@@ -349,7 +350,7 @@ class SkeinPolicyGate(gl.Contract):
             verdict=decision["verdict"],
             clause_id=decision["clause_id"],
             reason_code=decision["reason_code"],
-            facts_relied_on_csv=",".join(decision["facts_relied_on"]),
+            verified_facts_csv=",".join(verified_facts),
             decided_at=u256(now),
             expires_at=u256(expires_at),
         )
@@ -412,7 +413,7 @@ class SkeinPolicyGate(gl.Contract):
             "verdict": receipt.verdict,
             "clause_id": receipt.clause_id,
             "reason_code": receipt.reason_code,
-            "facts_relied_on_csv": receipt.facts_relied_on_csv,
+            "verified_facts_csv": receipt.verified_facts_csv,
             "decided_at": int(receipt.decided_at),
             "expires_at": int(receipt.expires_at),
         }
@@ -477,36 +478,49 @@ class SkeinPolicyGate(gl.Contract):
         # An attester removed from the policy no longer vouches for anything.
         return attestation.attester.as_hex.lower() in self._csv(policy.attesters_csv)
 
-    def _enforce_verified_facts(
+    def _effective_decision(
         self,
         decision: dict[str, typing.Any],
         policy: Policy,
         verified_facts: list[str],
     ) -> dict[str, typing.Any]:
-        """Deterministic gate: an ALLOW stands only if every fact it needs is attested.
+        """Turn the model's reading into the decision that takes effect.
 
-        Validators can only agree on how to read the request. Whether a fact is true is
-        settled here, from storage, so no wording in the request can satisfy it.
+        Deterministic gate: an ALLOW stands only if every required fact is attested on
+        chain. Validators can only agree on how to read the request; whether a fact is
+        true is settled here, from storage, so no wording in the request can satisfy it.
+        Reason codes are assigned here too, so they never depend on a model's wording.
         """
 
-        if decision["verdict"] != VERDICT_ALLOW:
-            return decision
-        needed = list(self._csv(policy.required_facts_csv))
-        for fact in decision["facts_relied_on"]:
-            if fact not in needed:
-                needed.append(fact)
-        for fact in needed:
-            if fact not in verified_facts:
-                return {
-                    "verdict": VERDICT_REVIEW,
-                    "clause_id": "",
-                    "reason_code": REASON_UNVERIFIED_FACTS,
-                    "authorized_scope": "",
-                    "ttl_seconds": 0,
-                    "policy_version": decision["policy_version"],
-                    "facts_relied_on": [],
-                }
-        return decision
+        verdict = decision["verdict"]
+        if verdict == VERDICT_ALLOW:
+            for fact in self._csv(policy.required_facts_csv):
+                if fact not in verified_facts:
+                    return {
+                        "verdict": VERDICT_REVIEW,
+                        "clause_id": "",
+                        "reason_code": REASON_UNVERIFIED_FACTS,
+                        "authorized_scope": "",
+                    }
+            return {
+                "verdict": VERDICT_ALLOW,
+                "clause_id": decision["clause_id"],
+                "reason_code": REASON_POLICY_PERMITS,
+                "authorized_scope": decision["authorized_scope"],
+            }
+        if verdict == VERDICT_DENY:
+            return {
+                "verdict": VERDICT_DENY,
+                "clause_id": decision["clause_id"],
+                "reason_code": REASON_POLICY_FORBIDS,
+                "authorized_scope": "",
+            }
+        return {
+            "verdict": VERDICT_REVIEW,
+            "clause_id": "",
+            "reason_code": REASON_NEEDS_REVIEW,
+            "authorized_scope": "",
+        }
 
     def _owned_policy(self, policy_id: str) -> Policy:
         if policy_id not in self.policies:
@@ -593,11 +607,8 @@ SECURITY RULES:
 - DENY when a cited clause explicitly conflicts with the request.
 - REVIEW when permission is ambiguous, a required fact is not verified, or clauses conflict.
 - Never authorize a broader or different scope than the requested resource_scope.
-- ttl_seconds for ALLOW must be between 60 and {int(policy.max_ttl_seconds)}.
-- DENY and REVIEW must use an empty authorized_scope, ttl_seconds 0 and an empty
-  facts_relied_on list.
-- For ALLOW, facts_relied_on lists every fact key from DECLARED_FACT_KEYS that the
-  cited clause depends on, sorted alphabetically.
+- For ALLOW and DENY, cite the single clause that decides the request.
+- DENY and REVIEW must use an empty authorized_scope.
 
 POLICY_ID: {policy_id}
 POLICY_VERSION: {int(policy.version)}
@@ -622,12 +633,9 @@ VERIFIED_FACTS: {verified}
 Return only a JSON object with exactly these fields:
 {{
   "verdict": "ALLOW" | "DENY" | "REVIEW",
-  "clause_id": "one id from ALLOWED_CLAUSE_IDS, or empty only for REVIEW",
-  "reason_code": "short UPPER_SNAKE_CASE code",
+  "clause_id": "one id from ALLOWED_CLAUSE_IDS, or empty for REVIEW",
   "authorized_scope": "exact RESOURCE_SCOPE for ALLOW, otherwise empty",
-  "ttl_seconds": integer,
-  "policy_version": {int(policy.version)},
-  "facts_relied_on": ["fact keys from DECLARED_FACT_KEYS"]
+  "policy_version": {int(policy.version)}
 }}
 """
 
@@ -656,52 +664,25 @@ Return only a JSON object with exactly these fields:
         if not isinstance(parsed, dict):
             raise gl.vm.UserError("Consensus result must be a JSON object")
 
-        required = {
-            "verdict",
-            "clause_id",
-            "reason_code",
-            "authorized_scope",
-            "ttl_seconds",
-            "policy_version",
-            "facts_relied_on",
-        }
+        required = {"verdict", "clause_id", "authorized_scope", "policy_version"}
         if set(parsed.keys()) != required:
             raise gl.vm.UserError("Consensus result has an invalid schema")
 
         verdict = parsed["verdict"]
         clause_id = parsed["clause_id"]
-        reason_code = parsed["reason_code"]
         authorized_scope = parsed["authorized_scope"]
-        ttl_seconds = parsed["ttl_seconds"]
         policy_version = parsed["policy_version"]
-        facts_relied_on = parsed["facts_relied_on"]
 
         if verdict not in (VERDICT_ALLOW, VERDICT_DENY, VERDICT_REVIEW):
             raise gl.vm.UserError("Consensus result has an invalid verdict")
-        if not isinstance(clause_id, str) or not isinstance(reason_code, str):
+        if not isinstance(clause_id, str):
             raise gl.vm.UserError("Consensus result contains invalid text fields")
         if not isinstance(authorized_scope, str):
             raise gl.vm.UserError("Consensus result contains an invalid scope")
-        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
-            raise gl.vm.UserError("Consensus result contains an invalid ttl")
         if not isinstance(policy_version, int) or isinstance(policy_version, bool):
             raise gl.vm.UserError("Consensus result contains an invalid policy version")
         if policy_version != int(policy.version):
             raise gl.vm.UserError("Consensus result used the wrong policy version")
-        if len(reason_code) == 0 or len(reason_code) > MAX_REASON:
-            raise gl.vm.UserError("Consensus result contains an invalid reason code")
-        if not self._is_reason_code(reason_code):
-            raise gl.vm.UserError("reason_code must be UPPER_SNAKE_CASE")
-        if not isinstance(facts_relied_on, list):
-            raise gl.vm.UserError("Consensus result contains invalid facts")
-        declared = self._csv(policy.fact_keys_csv)
-        for fact in facts_relied_on:
-            if not isinstance(fact, str) or fact not in declared:
-                raise gl.vm.UserError("Consensus result relied on an undeclared fact")
-        # Normalize so equivalent answers compare equal across validators.
-        facts_relied_on = sorted(set(facts_relied_on))
-        parsed = dict(parsed)
-        parsed["facts_relied_on"] = facts_relied_on
 
         clause_ids = self._clause_ids(policy.clause_ids_csv)
         if verdict in (VERDICT_ALLOW, VERDICT_DENY) and clause_id not in clause_ids:
@@ -712,11 +693,8 @@ Return only a JSON object with exactly these fields:
         if verdict == VERDICT_ALLOW:
             if authorized_scope != resource_scope:
                 raise gl.vm.UserError("Consensus result broadened or changed scope")
-            if ttl_seconds < 60 or ttl_seconds > int(policy.max_ttl_seconds):
-                raise gl.vm.UserError("Consensus result ttl is outside policy bounds")
-        else:
-            if authorized_scope != "" or ttl_seconds != 0 or len(facts_relied_on) != 0:
-                raise gl.vm.UserError("Non-ALLOW decisions cannot authorize access")
+        elif authorized_scope != "":
+            raise gl.vm.UserError("Non-ALLOW decisions cannot authorize access")
 
         return parsed
 
@@ -784,12 +762,6 @@ Return only a JSON object with exactly these fields:
     def _is_identifier(self, value: str) -> bool:
         for char in value:
             if not (char.isalnum() or char in ("_", "-")):
-                return False
-        return True
-
-    def _is_reason_code(self, value: str) -> bool:
-        for char in value:
-            if not (char.isupper() or char.isdigit() or char == "_"):
                 return False
         return True
 
